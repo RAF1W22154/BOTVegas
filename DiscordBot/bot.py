@@ -299,9 +299,33 @@ async def add_stock(interaction: discord.Interaction, ชื่อตู้: str
 
     await interaction.response.send_message(f"✅ เติมสต๊อกยศ `{ยศรางวัล.name}` สำเร็จ! ตอนนี้เหลือ `{new_stock}` ชิ้น (หน้าตู้ถูกอัปเดตแล้ว)", ephemeral=True)
 
+# ==================== 5. ระบบคำสั่งลบของรางวัลในตู้ (Real-time) ====================
+@bot.tree.command(name="ลบของรางวัลในตู้", description="[แอดมิน] ลบยศหรือของรางวัลออกจากตู้กาชา และอัปเดตหน้าตู้แบบเรียลไทม์")
+@app_commands.describe(ชื่อตู้="ชื่อตู้กาชาที่ต้องการลบของ", ยศรางวัล="เลือกยศที่ต้องการลบออกจากตู้")
+async def delete_gacha_prize(interaction: discord.Interaction, ชื่อตู้: str, ยศรางวัล: discord.Role):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
+        return
+
+    # เช็คว่ามีของรางวัลนี้อยู่ในตู้นั้นจริงๆ หรือไม่
+    cursor.execute("SELECT * FROM gacha_prizes WHERE box_name = ? AND role_id = ?", (ชื่อตู้, ยศรางวัล.id))
+    prize = cursor.fetchone()
+    if not prize:
+        await interaction.response.send_message(f"❌ ไม่พบยศ `{ยศรางวัล.name}` ในตู้กาชา `{ชื่อตู้}`", ephemeral=True)
+        return
+
+    # ลบข้อมูลออกจากฐานข้อมูล
+    cursor.execute("DELETE FROM gacha_prizes WHERE box_name = ? AND role_id = ?", (ชื่อตู้, ยศรางวัล.id))
+    db.commit()
+
+    # สั่งอัปเดตหน้าตู้กาชาแบบ Real-time ทันที
+    await update_gacha_embed(interaction.guild, ชื่อตู้)
+
+    await interaction.response.send_message(f"✅ ลบยศ `{ยศรางวัล.name}`ออกจากตู้ `{ชื่อตู้}` สำเร็จ! (หน้าตู้ถูกอัปเดตเรียบร้อยแล้ว)", ephemeral=True)
+
 @bot.tree.command(name="เพิ่มเวลาออน", description="[สำหรับแอดมิน] เพิ่มเวลาออนให้สมาชิก")
 @app_commands.describe(สมาชิก="เลือกผู้ใช้งาน", จำนวนนาที="จำนวนนาทีที่ต้องการเพิ่ม")
-async def add_total_time(interaction: discord.Interaction, สมาชิก: discord.Member, จำนวนนาที: int):
+async def add_total_time(interaction: discord.Interaction,สมาชิก: discord.Member, จำนวนนาที: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
