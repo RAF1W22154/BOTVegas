@@ -9,7 +9,6 @@ from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# กำหนดเส้นทางอ่านไฟล์จาก Secret Files ของ Render โดยตรง
 secret_file_path = "/etc/secrets/serviceAccountKey.json"
 
 if not firebase_admin._apps:
@@ -64,7 +63,6 @@ async def on_ready():
     except Exception as e:
         print(e)
 
-# ==================== คำสั่งพิเศษสำหรับซิงค์คำสั่งด่วน ====================
 @bot.tree.command(name="sync", description="[แอดมิน] ซิงค์คำสั่งทั้งหมดของบอท")
 async def sync_commands(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
@@ -74,7 +72,6 @@ async def sync_commands(interaction: discord.Interaction):
     synced = await bot.tree.sync()
     await interaction.response.send_message(f"✅ ซิงค์คำสั่ง Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง!", ephemeral=True)
 
-# ==================== ฟังก์ชันช่วยอัปเดตหน้าตู้กาชาแบบ Real-time ====================
 async def update_gacha_embed(guild: discord.Guild, box_name: str):
     box_ref = db.collection("gacha_boxes_info").document(box_name)
     box_doc = box_ref.get()
@@ -125,8 +122,6 @@ async def update_gacha_embed(guild: discord.Guild, box_name: str):
     view = GachaView(box_name)
     await message.edit(embed=embed, view=view)
 
-
-# ==================== ฟังก์ชันอัปเดตหน้าสรุปผลรวมสกอร์แคลนแบบ Real-time ====================
 async def update_clan_dashboard(guild: discord.Guild):
     dash_ref = db.collection("clan_dashboard").document(str(guild.id))
     dash_doc = dash_ref.get()
@@ -169,8 +164,6 @@ async def update_clan_dashboard(guild: discord.Guild):
 
     await message.edit(embed=embed, view=view)
 
-
-# ==================== ระบบนับเวลาออน (Real-time) ====================
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
@@ -210,8 +203,6 @@ async def check_time(interaction: discord.Interaction):
     embed.add_field(name="⏱ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
-# ==================== ระบบ UI กาชา ====================
 class GachaView(discord.ui.View):
     def __init__(self, box_name):
         super().__init__(timeout=None)
@@ -292,8 +283,6 @@ class GachaView(discord.ui.View):
         else:
             await interaction.followup.send(f"🎁 สุ่มได้ยศ **{role_name}** สำเร็จ!", ephemeral=True)
 
-
-# ==================== ระบบ UI สกอร์แคลน ====================
 class ClanSelectDropdown(discord.ui.Select):
     def __init__(self, clans):
         options = [discord.SelectOption(label=c, value=c, description=f"ดูรูปภาพสกอร์ของแคลน {c}") for c in clans]
@@ -358,10 +347,8 @@ class ClanGalleryView(discord.ui.View):
             self.update_buttons()
             await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
+# ==================== คำสั่งทั้งหมดของบอท ====================
 
-# ==================== รวมคำสั่งทั้งหมดของบอท ====================
-
-# 1. ระบบกาชา & จัดการตู้ (แอดมิน)
 @bot.tree.command(name="สร้างตู้กาชา", description="[แอดมิน] สร้างห้องตู้กาชาใหม่ พร้อมกำหนดราคาและรูปภาพ GIF")
 @app_commands.describe(ชื่อตู้="ชื่อระบุตู้กาชา", ใช้เวลาเล่นนาที="ใช้เวลาออนกี่นาทีต่อการสุ่ม", ลิงก์รูปภาพหรือgif="ลิงก์ GIF หรือลิงก์ตรงรูปภาพหน้าตู้")
 async def create_gacha_box(interaction: discord.Interaction, ชื่อตู้: str, ใช้เวลาเล่นนาที: int, ลิงก์รูปภาพหรือgif: str = None):
@@ -474,8 +461,6 @@ async def check_gacha_box(interaction: discord.Interaction, ชื่อตู�
     embed.add_field(name="🎁 ของรางวัลทั้งหมดในตู้", value=desc if desc else "❌ ยังไม่มีของรางวัลในตู้", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
-# 2. ระบบจัดการเวลาออนสมาชิก
 @bot.tree.command(name="เพิ่มเวลาออน", description="[แอดมิน] เพิ่มเวลาออนให้สมาชิก")
 @app_commands.describe(สมาชิก="เลือกผู้ใช้งาน", จำนวนนาที="จำนวนนาทีที่ต้องการเพิ่ม")
 async def add_total_time(interaction: discord.Interaction, สมาชิก: discord.Member, จำนวนนาที: int):
@@ -523,15 +508,13 @@ async def check_other_time(interaction: discord.Interaction, สมาชิก:
     user_doc = user_ref.get()
     
     total_sec = user_doc.to_dict().get("total_time", 0) if user_doc.exists else 0
-    ifสมาชิก.id in voice_sessions:
+    if สมาชิก.id in voice_sessions:
         total_sec += int(time.time()) - voice_sessions[สมาชิก.id]
 
     embed = discord.Embed(title=f"📊 ข้อมูลเวลาออนไลน์ของ {สมาชิก.display_name}", color=discord.Color.blue())
     embed.add_field(name="⏱ เวลาออนสะสม", value=f"`{format_time(total_sec)}`", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
-# 3. ระบบสกอร์แคลน (Clan Score)
 @bot.tree.command(name="สร้างสกอแคลน", description="[แอดมิน] สร้างหัวข้อแคลนใหม่ในระบบสกอร์")
 @app_commands.describe(ชื่อแคลน="ชื่อแคลนที่ต้องการสร้าง")
 async def create_clan(interaction: discord.Interaction, ชื่อแคลน: str):
@@ -622,7 +605,6 @@ async def delete_clan_score(interaction: discord.Interaction, รหัสรู
 
     await interaction.followup.send(f"🗑️ ลบรูปภาพ ID `{รหัสรูปภาพ_id}` ออกจากระบบเรียบร้อยแล้ว", ephemeral=True)
     await update_clan_dashboard(interaction.guild)
-
 
 # ==================== รันระบบทั้งหมด ====================
 if __name__ == "__main__":
