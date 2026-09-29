@@ -1,4 +1,11 @@
 import os
+import time
+import random
+from threading import Thread
+from flask import Flask
+import discord
+from discord import app_commands
+from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -63,7 +70,7 @@ async def sync_commands(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
-    
+     
     synced = await bot.tree.sync()
     await interaction.response.send_message(f"✅ ซิงค์คำสั่ง Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง!", ephemeral=True)
 
@@ -156,7 +163,7 @@ async def update_clan_dashboard(guild: discord.Guild):
         for c_name in clans:
             scores_ref = db.collection("clans").document(c_name).collection("scores").stream()
             count = sum(1 for _ in scores_ref)
-            desc += f"🛡️️ **{c_name}**: มีรูปภาพสะสม `{count}` รูป\n"
+            desc += f"🛡 **{c_name}**: มีรูปภาพสะสม `{count}` รูป\n"
         embed.add_field(name="📋 รายชื่อแคลนทั้งหมด", value=desc, inline=False)
         view = ClanSelectView(clans)
 
@@ -198,7 +205,7 @@ async def check_time(interaction: discord.Interaction):
         total_sec += int(time.time()) - voice_sessions[interaction.user.id]
 
     embed = discord.Embed(title="📊 ข้อมูลเวลาออนไลน์ของคุณ", color=discord.Color.blue())
-    embed.add_field(name="⏱️ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
+    embed.add_field(name="⏱️️ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -474,102 +481,13 @@ async def remove_total_time(interaction: discord.Interaction, สมาชิก
 
     new_time = max(0, user_doc.to_dict().get("total_time", 0) - remove_seconds)
     user_ref.set({"total_time": new_time}, merge=True)
-    await interaction.response.send_message(f"✅ หักเวลา {สมาชิก.mention} ออก `{จำนวนนาทีที่ต้องการลบ}` นาทีแล้ว", ephemeral=True)
+    await interaction.response.send_message(f"✅ หักเวลาออนของ {สมาชิก.mention} ออก `{จำนวนนาทีที่ต้องการลบ}` นาทีเรียบร้อย", ephemeral=True)
 
-
-# --- คำสั่งระบบสกอร์แคลน ---
-@bot.tree.command(name="สร้างสกอแคลน", description="[แอดมิน] สร้างหัวข้อแคลนใหม่ในระบบสกอร์")
-@app_commands.describe(ชื่อแคลน="ชื่อแคลนที่ต้องการสร้าง")
-async def create_clan(interaction: discord.Interaction, ชื่อแคลน: str):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    clan_ref = db.collection("clans").document(ชื่อแคลน)
-    if clan_ref.get().exists:
-        await interaction.response.send_message(f"❌ มีแคลน `{ชื่อแคลน}` อยู่ในระบบแล้ว", ephemeral=True)
-        return
-
-    clan_ref.set({"created_at": firestore.SERVER_TIMESTAMP})
-    await interaction.response.send_message(f"✅ สร้างแคลน `{ชื่อแคลน}` ในระบบสกอร์เรียบร้อยแล้ว!", ephemeral=True)
-    await update_clan_dashboard(interaction.guild)
-
-@bot.tree.command(name="ลบแคลน", description="[แอดมิน] ลบชื่อแคลนและรูปภาพทั้งหมด")
-@app_commands.describe(ชื่อแคลน="ชื่อแคลนที่ต้องการลบ")
-async def delete_clan(interaction: discord.Interaction, ชื่อแคลน: str):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    db.collection("clans").document(ชื่อแคลน).delete()
-    await interaction.response.send_message(f"⚠️ ลบแคลน `{ชื่อแคลน}` เรียบร้อยแล้ว", ephemeral=True)
-    await update_clan_dashboard(interaction.guild)
-
-@bot.tree.command(name="แสดงผลรวม", description="[แอดมิน] สร้างหน้าต่างรายงานสกอร์แคลนแบบ Real-time")
-async def show_clan_dashboard(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    embed = discord.Embed(title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน", description="กำลังโหลดข้อมูล...", color=discord.Color.blue())
-    await interaction.response.send_message("✅ สร้างหน้าต่างรายงานผลรวมเรียบร้อยแล้ว!", ephemeral=True)
-    message = await interaction.channel.send(embed=embed)
-
-    db.collection("clan_dashboard").document(str(interaction.guild.id)).set({
-        "guild_id": interaction.guild.id,
-        "channel_id": interaction.channel.id,
-        "message_id": message.id
-    })
-    await update_clan_dashboard(interaction.guild)
-
-@bot.tree.command(name="เพิ่มรูป", description="อัปโหลดรูปภาพสกอร์แคลนเข้าสู่ระบบ")
-@app_commands.describe(ชื่อแคลน="เลือกชื่อแคลน", รูปภาพสกอร์="แนบไฟล์รูปภาพสกอร์การแข่ง")
-async def add_clan_score(interaction: discord.Interaction, ชื่อแคลน: str, รูปภาพสกอร์: discord.Attachment):
-    clan_ref = db.collection("clans").document(ชื่อแคลน)
-    if not clan_ref.get().exists:
-        await interaction.response.send_message(f"❌ ไม่พบแคลน `{ชื่อแคลน}` ในระบบ", ephemeral=True)
-        return
-
-    clan_ref.collection("scores").add({
-        "user_id": interaction.user.id,
-        "image_url": รูปภาพสกอร์.url,
-        "timestamp": firestore.SERVER_TIMESTAMP
-    })
-
-    await interaction.response.send_message(f"✅ บันทึกรูปภาพสกอร์ของแคลน `{ชื่อแคลน}` สำเร็จเรียบร้อยแล้ว!", ephemeral=True)
-    await update_clan_dashboard(interaction.guild)
-
-@bot.tree.command(name="ลบรูปภาพ", description="ลบรูปภาพสกอร์แคลนของคุณด้วยรหัสรูป (ID)")
-@app_commands.describe(รหัสรูปภาพ_id="รหัส ID ของรูปภาพที่ต้องการลบ")
-async def delete_clan_score(interaction: discord.Interaction, รหัสรูปภาพ_id: str):
-    found = False
-    clan_name_found = None
-    
-    clans_ref = db.collection("clans").stream()
-    for clan in clans_ref:
-        score_ref = db.collection("clans").document(clan.id).collection("scores").document(รหัสรูปภาพ_id)
-        score_doc = score_ref.get()
-        if score_doc.exists:
-            score_data = score_doc.to_dict()
-            owner_id = score_data.get("user_id")
-            
-            if interaction.user.id != owner_id and not interaction.user.guild_permissions.administrator:
-                await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ลบรูปภาพนี้ (ลบได้เฉพาะรูปที่คุณอัปโหลดเท่านั้น)", ephemeral=True)
-                return
-            
-            score_ref.delete()
-            found = True
-            clan_name_found = clan.id
-            break
-
-    if not found:
-        await interaction.response.send_message(f"❌ ไม่พบรูปภาพที่มีรหัส ID `{รหัสรูปภาพ_id}` นี้ในระบบ", ephemeral=True)
-        return
-
-    await interaction.response.send_message(f"🗑️ ลบรูปภาพ ID `{รหัสรูปภาพ_id}` ออกจากระบบเรียบร้อยแล้ว", ephemeral=True)
-    await update_clan_dashboard(interaction.guild)
-
-
+# ==================== รันระบบทั้งหมด ====================
 if __name__ == "__main__":
     keep_alive()
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("❌ ไม่พบ Environment Variable 'DISCORD_BOT_TOKEN' กรุณาตั้งค่า Token ของบอทใน Render ก่อนเริ่มใช้งาน")
