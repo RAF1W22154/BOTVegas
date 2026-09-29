@@ -5,7 +5,24 @@ from discord.ext import commands
 import sqlite3
 import random
 import time
+from flask import Flask
+from threading import Thread
 
+# ==================== ระบบเว็บเซิร์ฟเวอร์จำลอง (สำหรับรันบน Render 24 ชม.) ====================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Vegas Bot is Online!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# ==================== ตั้งค่าบอท Discord ====================
 intents = discord.Intents.default()
 intents.guilds = True
 intents.voice_states = True
@@ -456,7 +473,7 @@ async def edit_gacha_time(interaction: discord.Interaction, ชื่อตู�
 
 @bot.tree.command(name="เพิ่มเวลาออน", description="[แอดมิน] เพิ่มเวลาออนให้สมาชิก")
 @app_commands.describe(สมาชิก="เลือกผู้ใช้งาน", จำนวนนาที="จำนวนนาทีที่ต้องการเพิ่ม")
-async def add_total_time(interaction: discord.Interaction,สมาชิก: discord.Member, จำนวนนาที: int):
+async def add_total_time(interaction: discord.Interaction, สมาชิก: discord.Member, จำนวนนาที: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
@@ -573,7 +590,6 @@ async def delete_clan_score(interaction: discord.Interaction, รหัสรู
 
     owner_id, clan_name = score
 
-    # ถ้าไม่ใช่เจ้าของรูป และไม่ใช่แอดมิน จะลบไม่ได้
     if interaction.user.id != owner_id and not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ลบรูปภาพนี้ (ลบได้เฉพาะรูปที่คุณอัปโหลดเท่านั้น)", ephemeral=True)
         return
@@ -585,4 +601,7 @@ async def delete_clan_score(interaction: discord.Interaction, รหัสรู
     await update_clan_dashboard(interaction.guild)
 
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+# ==================== บรรทัดรันระบบหลัก ====================
+if __name__ == "__main__":
+    keep_alive()
+    bot.run(os.getenv("DISCORD_TOKEN"))
