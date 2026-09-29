@@ -1,19 +1,15 @@
 import os
-import discord
-from discord import app_commands
-from discord.ext import commands
-import random
-import time
-from flask import Flask
-from threading import Thread
-
-# --- Firebase Admin SDK Setup ---
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# เริ่มต้นเชื่อมต่อ Firebase
+# กำหนดเส้นทางอ่านไฟล์จาก Secret Files ของ Render โดยตรง
+secret_file_path = "/etc/secrets/serviceAccountKey.json"
+
 if not firebase_admin._apps:
-    if os.path.exists("serviceAccountKey.json"):
+    if os.path.exists(secret_file_path):
+        cred = credentials.Certificate(secret_file_path)
+        firebase_admin.initialize_app(cred)
+    elif os.path.exists("serviceAccountKey.json"):
         cred = credentials.Certificate("serviceAccountKey.json")
         firebase_admin.initialize_app(cred)
     else:
