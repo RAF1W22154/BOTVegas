@@ -196,6 +196,8 @@ async def on_voice_state_update(member, before, after):
 
 @bot.tree.command(name="เช็คเวลาออน", description="ตรวจสอบชั่วโมงเวลาออนไลน์ของคุณแบบเรียลไทม์")
 async def check_time(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
     user_id_str = str(interaction.user.id)
     user_ref = db.collection("users").document(user_id_str)
     user_doc = user_ref.get()
@@ -205,8 +207,8 @@ async def check_time(interaction: discord.Interaction):
         total_sec += int(time.time()) - voice_sessions[interaction.user.id]
 
     embed = discord.Embed(title="📊 ข้อมูลเวลาออนไลน์ของคุณ", color=discord.Color.blue())
-    embed.add_field(name="⏱️️ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    embed.add_field(name="⏱ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ==================== 3. ระบบ UI กาชา ====================
@@ -217,13 +219,15 @@ class GachaView(discord.ui.View):
 
     @discord.ui.button(label="🎰 กดสุ่มกาชา", style=discord.ButtonStyle.green, custom_id="spin_gacha_btn")
     async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
         user_id = interaction.user.id
         user_id_str = str(user_id)
         
         box_ref = db.collection("gacha_boxes_info").document(self.box_name)
         box_doc = box_ref.get()
         if not box_doc.exists:
-            await interaction.response.send_message("❌ ไม่พบข้อมูลตู้กาชานี้ในระบบ!", ephemeral=True)
+            await interaction.followup.send("❌ ไม่พบข้อมูลตู้กาชานี้ในระบบ!", ephemeral=True)
             return
 
         box_info = box_doc.to_dict()
@@ -231,7 +235,7 @@ class GachaView(discord.ui.View):
 
         prizes_ref = list(box_ref.collection("prizes").stream())
         if not prizes_ref:
-            await interaction.response.send_message("❌ ตู้กาชานี้ยังไม่มีของรางวัลในระบบ!", ephemeral=True)
+            await interaction.followup.send("❌ ตู้กาชานี้ยังไม่มีของรางวัลในระบบ!", ephemeral=True)
             return
 
         user_ref = db.collection("users").document(user_id_str)
@@ -242,13 +246,13 @@ class GachaView(discord.ui.View):
             user_total_sec += int(time.time()) - voice_sessions[user_id]
 
         if user_total_sec < cost_seconds:
-            await interaction.response.send_message(f"❌ เวลาออนของคุณไม่เพียงพอ! (ต้องใช้ {box_info.get('cost_minutes', 60)} นาที)", ephemeral=True)
+            await interaction.followup.send(f"❌ เวลาออนของคุณไม่เพียงพอ! (ต้องใช้ {box_info.get('cost_minutes', 60)} นาที)", ephemeral=True)
             return
 
         prizes = [p.to_dict() for p in prizes_ref]
         available_prizes = [p for p in prizes if p.get("stock", 0) > 0]
         if not available_prizes:
-            await interaction.response.send_message("❌ เสียใจด้วย! ของรางวัลในตู้หมดเกลี้ยงทุกชิ้นแล้ว รอแอดมินมาเติมสต๊อกก่อนนะ", ephemeral=True)
+            await interaction.followup.send("❌ เสียใจด้วย! ของรางวัลในตู้หมดเกลี้ยงทุกชิ้นแล้ว รอแอดมินมาเติมสต๊อกก่อนนะ", ephemeral=True)
             return
 
         total_rate = sum(p.get("rate", 0) for p in available_prizes)
@@ -282,11 +286,11 @@ class GachaView(discord.ui.View):
         if role:
             try:
                 await interaction.user.add_roles(role)
-                await interaction.response.send_message(f"🎉 ยินดีด้วย! คุณสุ่มได้ยศ **{role.name}** และระบบได้ติดยศให้คุณเรียบร้อยแล้ว!", ephemeral=True)
+                await interaction.followup.send(f"🎉 ยินดีด้วย! คุณสุ่มได้ยศ **{role.name}** และระบบได้ติดยศให้คุณเรียบร้อยแล้ว!", ephemeral=True)
             except Exception:
-                await interaction.response.send_message(f"🎉 สุ่มได้ยศ **{role.name}** สำเร็จ แต่บอทไม่มีสิทธิ์แจกยศ (กรุณาตรวจสอบลำดับยศของบอท)", ephemeral=True)
+                await interaction.followup.send(f"🎉 สุ่มได้ยศ **{role.name}** สำเร็จ แต่บอทไม่มีสิทธิ์แจกยศ (กรุณาตรวจสอบลำดับยศของบอท)", ephemeral=True)
         else:
-            await interaction.response.send_message(f"🎁 สุ่มได้ยศ **{role_name}** สำเร็จ!", ephemeral=True)
+            await interaction.followup.send(f"🎁 สุ่มได้ยศ **{role_name}** สำเร็จ!", ephemeral=True)
 
 
 # ==================== 4. ระบบ UI สกอร์แคลน ====================
@@ -296,17 +300,18 @@ class ClanSelectDropdown(discord.ui.Select):
         super().__init__(placeholder="📂 เลือกดูรูปภาพสกอร์แคลน...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         selected_clan = self.values[0]
         scores_ref = db.collection("clans").document(selected_clan).collection("scores").order_by("timestamp").stream()
         scores = [(s.id, s.to_dict()) for s in scores_ref]
 
         if not scores:
-            await interaction.response.send_message(f"❌ แคลน `{selected_clan}` ยังไม่มีรูปภาพสกอร์ในระบบ", ephemeral=True)
+            await interaction.followup.send(f"❌ แคลน `{selected_clan}` ยังไม่มีรูปภาพสกอร์ในระบบ", ephemeral=True)
             return
 
         view = ClanGalleryView(scores, selected_clan, index=0)
         embed = view.get_embed()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 class ClanSelectView(discord.ui.View):
     def __init__(self, clans):
@@ -482,6 +487,43 @@ async def remove_total_time(interaction: discord.Interaction, สมาชิก
     new_time = max(0, user_doc.to_dict().get("total_time", 0) - remove_seconds)
     user_ref.set({"total_time": new_time}, merge=True)
     await interaction.response.send_message(f"✅ หักเวลาออนของ {สมาชิก.mention} ออก `{จำนวนนาทีที่ต้องการลบ}` นาทีเรียบร้อย", ephemeral=True)
+
+# คำสั่งสำหรับสร้างแดชบอร์ดสรุปสกอร์แคลน
+@bot.tree.command(name="สร้างสกอร์แคลน", description="[แอดมิน] สร้างหน้าต่างแดชบอร์ดสรุปผลและรูปภาพสกอร์แคลน")
+async def create_clan_dashboard_cmd(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
+        return
+
+    clans_ref = db.collection("clans").stream()
+    clans = [c.id for c in clans_ref]
+
+    embed = discord.Embed(
+        title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน (Vegas Clan Score)",
+        description="เลือกชื่อแคลนจากเมนูดรอปดาวน์ด้านล่างเพื่อดูรูปภาพสกอร์การแข่งทั้งหมด",
+        color=discord.Color.blue()
+    )
+
+    if not clans:
+        embed.add_field(name="สถานะ", value="❌ ยังไม่มีแคลนในระบบ", inline=False)
+        view = None
+    else:
+        desc = ""
+        for c_name in clans:
+            scores_ref = db.collection("clans").document(c_name).collection("scores").stream()
+            count = sum(1 for _ in scores_ref)
+            desc += f"🛡 **{c_name}**: มีรูปภาพสะสม `{count}` รูป\n"
+        embed.add_field(name="📋 รายชื่อแคลนทั้งหมด", value=desc, inline=False)
+        view = ClanSelectView(clans)
+
+    await interaction.response.send_message("✅ สร้างแดชบอร์ดสกอร์แคลนเรียบร้อยแล้ว!", ephemeral=True)
+    message = await interaction.channel.send(embed=embed, view=view)
+
+    dash_ref = db.collection("clan_dashboard").document(str(interaction.guild.id))
+    dash_ref.set({
+        "channel_id": interaction.channel.id,
+        "message_id": message.id
+    })
 
 # ==================== รันระบบทั้งหมด ====================
 if __name__ == "__main__":
