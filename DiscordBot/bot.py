@@ -2,18 +2,28 @@ import os
 import discord
 from discord import app_commands
 from discord.ext import commands
-import sqlite3
 import random
 import time
 from flask import Flask
 from threading import Thread
+
+# --- Firebase Admin SDK Setup ---
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# เริ่มต้นเชื่อมต่อ Firebase โดยใช้กุญแจบริการ (วางไฟล์ serviceAccountKey.json ไว้ที่เดียวกัน)
+if not firebase_admin._apps:
+    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
 
 # ==================== ระบบเว็บเซิร์ฟเวอร์จำลอง (สำหรับรันบน Render 24 ชม.) ====================
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Vegas Bot is Online!"
+    return "Vegas Bot is Online with Firebase!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -31,70 +41,6 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==================== 1. ระบบฐานข้อมูล SQLite (รวมตู้กาชาและสกอร์แคลน) ====================
-db = sqlite3.connect("bot_database.db")
-cursor = db.cursor()
-
-# ตารางเวลาออนของผู้ใช้
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    total_time INTEGER DEFAULT 0
-)
-""")
-
-# ตารางข้อมูลตู้กาชา
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS gacha_boxes_info (
-    box_name TEXT PRIMARY KEY,
-    cost_minutes INTEGER DEFAULT 60,
-    image_url TEXT,
-    channel_id INTEGER,
-    message_id INTEGER
-)
-""")
-
-# ตารางเก็บของรางวัลในตู้กาชา
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS gacha_prizes (
-    box_name TEXT,
-    role_id INTEGER,
-    role_name TEXT,
-    rate REAL,
-    stock INTEGER DEFAULT 0,
-    PRIMARY KEY (box_name, role_id)
-)
-""")
-
-# ตารางแคลนสำหรับระบบสกอร์
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS clans (
-    clan_name TEXT PRIMARY KEY
-)
-""")
-
-# ตารางเก็บรูปภาพสกอร์แคลน
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS clan_scores (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    clan_name TEXT,
-    user_id INTEGER,
-    image_url TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
-# ตารางเก็บสถานะข้อความสรุปสกอร์แคลน (สำหรับระบบ Real-time)
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS clan_dashboard (
-    guild_id INTEGER PRIMARY KEY,
-    channel_id INTEGER,
-    message_id INTEGER
-)
-""")
-
-db.commit()
-
 voice_sessions = {}
 
 def format_time(seconds):
@@ -105,7 +51,7 @@ def format_time(seconds):
 
 @bot.event
 async def on_ready():
-    print(f" Vegas BOT ออนไลน์แล้ว: {bot.user.name}")
+    print(f" Vegas BOT ออนไลน์แล้ว (เชื่อมต่อ Firebase เรียบร้อย): {bot.user.name}")
     try:
         synced = await bot.tree.sync()
         print(f"ซิงค์ Slash Commands ทั้งหมด {len(synced)} คำสั่งเรียบร้อยแล้ว")
@@ -114,12 +60,17 @@ async def on_ready():
 
 # ==================== ฟังก์ชันช่วยอัปเดตหน้าตู้กาชาแบบ Real-time ====================
 async def update_gacha_embed(guild: discord.Guild, box_name: str):
-    cursor.execute("SELECT cost_minutes, image_url, channel_id, message_id FROM gacha_boxes_info WHERE box_name = ?", (box_name,))
-    box_info = cursor.fetchone()
-    if not box_info:
+    box_ref = db.collection("gacha_boxes").document(box_name)
+    box_doc = box_ref.get()
+    if not box_doc.exists:
         return
 
-    cost_minutes, image_url, channel_id, message_id = box_info
+    box_info = box_doc.to_dict()
+    cost_minutes = box_info.get("cost_minutes", 60)
+    image_url = box_info.get("image_url")
+    channel_id = box_info.get("channel_id")
+    message_id = box_info.get("message_id")
+
     if not channel_id or not message_id:
         return
 
@@ -132,8 +83,12 @@ async def update_gacha_embed(guild: discord.Guild, box_name: str):
     except Exception:
         return
 
-    cursor.execute("SELECT role_name, rate, stock FROM gacha_prizes WHERE box_name = ?", (box_name,))
-    prizes = cursor.fetchall()
+    # ดึงของรางวัลในตู้จาก Firestore Sub-collection
+    prizes_ref = box_ref.collection("prizes").stream()
+    prizes = []
+    for p in prizes_ref:
+        p_data = p.to_dict()
+        prizes.append((p_data.get("role_id"), p_data.get("role_name"), p_data.get("rate"), p_data.get("stock")))
 
     embed = discord.Embed(
         title=f"🎰 ตู้กาชา: {box_name}", 
@@ -145,7 +100,7 @@ async def update_gacha_embed(guild: discord.Guild, box_name: str):
         embed.add_field(name="สถานะ", value="❌ ยังไม่มีของรางวัลในตู้ (รอแอดมินเติม)", inline=False)
     else:
         desc = ""
-        for idx, (r_name, rate, stock) in enumerate(prizes, 1):
+        for idx, (r_id, r_name, rate, stock) in enumerate(prizes, 1):
             desc += f"**{idx}. ยศ:** `{r_name}` | **เรท:** `{rate}%` | **สต๊อก:** `{stock}` ชิ้น\n"
         embed.add_field(name="🎁 รายละเอียดไอเทม", value=desc, inline=False)
 
@@ -158,12 +113,15 @@ async def update_gacha_embed(guild: discord.Guild, box_name: str):
 
 # ==================== ฟังก์ชันอัปเดตหน้าสรุปผลรวมสกอร์แคลนแบบ Real-time ====================
 async def update_clan_dashboard(guild: discord.Guild):
-    cursor.execute("SELECT channel_id, message_id FROM clan_dashboard")
-    dash = cursor.fetchone()
-    if not dash:
+    dash_ref = db.collection("settings").document("clan_dashboard")
+    dash_doc = dash_ref.get()
+    if not dash_doc.exists:
         return
 
-    channel_id, message_id = dash
+    dash_info = dash_doc.to_dict()
+    channel_id = dash_info.get("channel_id")
+    message_id = dash_info.get("message_id")
+
     channel = guild.get_channel(channel_id)
     if not channel:
         return
@@ -173,8 +131,8 @@ async def update_clan_dashboard(guild: discord.Guild):
     except Exception:
         return
 
-    cursor.execute("SELECT clan_name FROM clans")
-    clans = cursor.fetchall()
+    clans_ref = db.collection("clans").stream()
+    clans = [c.id for c in clans_ref]
 
     embed = discord.Embed(
         title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน (Vegas Clan Score)",
@@ -187,10 +145,9 @@ async def update_clan_dashboard(guild: discord.Guild):
         view = None
     else:
         desc = ""
-        for clan in clans:
-            c_name = clan[0]
-            cursor.execute("SELECT COUNT(*) FROM clan_scores WHERE clan_name = ?", (c_name,))
-            count = cursor.fetchone()[0]
+        for c_name in clans:
+            scores_ref = db.collection("clans").document(c_name).collection("scores").stream()
+            count = sum(1 for _ in scores_ref)
             desc += f"🛡️ **{c_name}**: มีรูปภาพสะสม `{count}` รูป\n"
         embed.add_field(name="📋 รายชื่อแคลนทั้งหมด", value=desc, inline=False)
         view = ClanSelectView(clans)
@@ -198,7 +155,7 @@ async def update_clan_dashboard(guild: discord.Guild):
     await message.edit(embed=embed, view=view)
 
 
-# ==================== 2. ระบบนับเวลาออน (Real-time) ====================
+# ==================== 2. ระบบนับเวลาออน (Real-time บน Firestore) ====================
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
@@ -212,24 +169,29 @@ async def on_voice_state_update(member, before, after):
             start_time = voice_sessions.pop(member.id)
             duration = current_time - start_time
 
-            cursor.execute("SELECT total_time FROM users WHERE user_id = ?", (member.id,))
-            result = cursor.fetchone()
-            if result:
-                new_total = result[0] + duration
-                cursor.execute("UPDATE users SET total_time = ? WHERE user_id = ?", (new_total, member.id))
+            user_ref = db.collection("users").document(str(member.id))
+            user_doc = user_ref.get()
+            
+            if user_doc.exists:
+                current_total = user_doc.to_dict().get("total_time", 0)
+                new_total = current_total + duration
             else:
-                cursor.execute("INSERT INTO users (user_id, total_time) VALUES (?, ?)", (member.id, duration))
-            db.commit()
+                new_total = duration
+
+            user_ref.set({"total_time": new_total}, merge=True)
 
 @bot.tree.command(name="เช็คเวลาออน", description="ตรวจสอบชั่วโมงเวลาออนไลน์ของคุณแบบเรียลไทม์")
 async def check_time(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    cursor.execute("SELECT total_time FROM users WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
+    user_id_str = str(interaction.user.id)
+    user_ref = db.collection("users").document(user_id_str)
+    user_doc = user_ref.get()
     
-    total_sec = result[0] if result else 0
-    if user_id in voice_sessions:
-        total_sec += int(time.time()) - voice_sessions[user_id]
+    total_sec = 0
+    if user_doc.exists:
+        total_sec = user_doc.to_dict().get("total_time", 0)
+
+    if interaction.user.id in voice_sessions:
+        total_sec += int(time.time()) - voice_sessions[interaction.user.id]
 
     embed = discord.Embed(title="📊 ข้อมูลเวลาออนไลน์ของคุณ", color=discord.Color.blue())
     embed.add_field(name="⏱️ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
@@ -245,44 +207,47 @@ class GachaView(discord.ui.View):
     @discord.ui.button(label="🎰 กดสุ่มกาชา", style=discord.ButtonStyle.green, custom_id="spin_gacha_btn")
     async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
+        user_id_str = str(user_id)
         
-        cursor.execute("SELECT cost_minutes FROM gacha_boxes_info WHERE box_name = ?", (self.box_name,))
-        box_info = cursor.fetchone()
-        if not box_info:
+        box_ref = db.collection("gacha_boxes").document(self.box_name)
+        box_doc = box_ref.get()
+        if not box_doc.exists:
             await interaction.response.send_message("❌ ไม่พบข้อมูลตู้กาชานี้ในระบบ!", ephemeral=True)
             return
 
-        cost_seconds = box_info[0] * 60
+        box_info = box_doc.to_dict()
+        cost_minutes = box_info.get("cost_minutes", 60)
+        cost_seconds = cost_minutes * 60
 
-        cursor.execute("SELECT role_id, role_name, rate, stock FROM gacha_prizes WHERE box_name = ?", (self.box_name,))
-        prizes = cursor.fetchall()
-        if not prizes:
+        prizes_ref = list(box_ref.collection("prizes").stream())
+        if not prizes_ref:
             await interaction.response.send_message("❌ ตู้กาชานี้ยังไม่มีของรางวัลในระบบ!", ephemeral=True)
             return
 
-        cursor.execute("SELECT total_time FROM users WHERE user_id = ?", (user_id,))
-        user_data = cursor.fetchone()
-        user_total_sec = user_data[0] if user_data else 0
+        user_ref = db.collection("users").document(user_id_str)
+        user_doc = user_ref.get()
+        user_total_sec = user_doc.to_dict().get("total_time", 0) if user_doc.exists else 0
 
         if user_id in voice_sessions:
             user_total_sec += int(time.time()) - voice_sessions[user_id]
 
         if user_total_sec < cost_seconds:
-            await interaction.response.send_message(f"❌ เวลาออนของคุณไม่เพียงพอ! (ต้องใช้ {box_info[0]} นาที)", ephemeral=True)
+            await interaction.response.send_message(f"❌ เวลาออนของคุณไม่เพียงพอ! (ต้องใช้ {cost_minutes} นาที)", ephemeral=True)
             return
 
-        available_prizes = [p for p in prizes if p[3] > 0]
+        prizes = [p.to_dict() for p in prizes_ref]
+        available_prizes = [p for p in prizes if p.get("stock", 0) > 0]
         if not available_prizes:
-            await interaction.response.send_message("❌ เสียใจด้วย! ของรางวัลในตู้หมดเกลี้ยงทุกชิ้นแล้ว รอแอดมินมาเติมสต๊อกก่อนนะ", ephemeral=True)
+            await interaction.response.send_message("❌ เสียใจด้วย! ของรางวัลในตู้หมดเกลี้ยงทุกชิ้นแล้ว", ephemeral=True)
             return
 
-        total_rate = sum(p[2] for p in available_prizes)
+        total_rate = sum(p.get("rate", 0) for p in available_prizes)
         roll = random.uniform(0, total_rate)
         
         current = 0
         selected = None
         for p in available_prizes:
-            current += p[2]
+            current += p.get("rate", 0)
             if roll <= current:
                 selected = p
                 break
@@ -290,18 +255,19 @@ class GachaView(discord.ui.View):
         if not selected:
             selected = available_prizes[0]
 
-        role_id, role_name = selected[0], selected[1]
+        role_id = selected.get("role_id")
+        role_name = selected.get("role_name")
 
+        # หักเวลาออน
+        new_total_sec = user_total_sec - cost_seconds
         if user_id in voice_sessions:
             voice_sessions[user_id] = int(time.time())
-            new_total_sec = user_total_sec - cost_seconds
-            cursor.execute("INSERT OR REPLACE INTO users (user_id, total_time) VALUES (?, ?)", (user_id, new_total_sec))
-        else:
-            new_total_sec = user_total_sec - cost_seconds
-            cursor.execute("UPDATE users SET total_time = ? WHERE user_id = ?", (new_total_sec, user_id))
+        user_ref.set({"total_time": new_total_sec}, merge=True)
 
-        cursor.execute("UPDATE gacha_prizes SET stock = stock - 1 WHERE box_name = ? AND role_id = ?", (self.box_name, role_id))
-        db.commit()
+        # ลดสต๊อกใน Firestore
+        prize_doc_ref = box_ref.collection("prizes").document(str(role_id))
+        current_stock = selected.get("stock", 1)
+        prize_doc_ref.update({"stock": current_stock - 1})
 
         await update_gacha_embed(interaction.guild, self.box_name)
 
@@ -311,21 +277,21 @@ class GachaView(discord.ui.View):
                 await interaction.user.add_roles(role)
                 await interaction.response.send_message(f"🎉 ยินดีด้วย! คุณสุ่มได้ยศ **{role.name}** และระบบได้ติดยศให้คุณเรียบร้อยแล้ว!", ephemeral=True)
             except Exception:
-                await interaction.response.send_message(f"🎉 สุ่มได้ยศ **{role.name}** สำเร็จ แต่บอทไม่มีสิทธิ์แจกยศ (กรุณาตรวจสอบลำดับยศของบอท)", ephemeral=True)
+                await interaction.response.send_message(f"🎉 สุ่มได้ยศ **{role.name}** สำเร็จ แต่บอทไม่มีสิทธิ์แจกยศ", ephemeral=True)
         else:
             await interaction.response.send_message(f"🎁 สุ่มได้ยศ **{role_name}** สำเร็จ!", ephemeral=True)
 
 
-# ==================== 4. ระบบ UI สกอร์แคลน (ดรอปดาวน์เลือกแคลน & ปุ่มเลื่อนภาพ) ====================
+# ==================== 4. ระบบ UI สกอร์แคลน ====================
 class ClanSelectDropdown(discord.ui.Select):
     def __init__(self, clans):
-        options = [discord.SelectOption(label=clan[0], value=clan[0], description=f"ดูรูปภาพสกอร์ของแคลน {clan[0]}") for clan in clans]
+        options = [discord.SelectOption(label=c, value=c, description=f"ดูรูปภาพสกอร์ของแคลน {c}") for c in clans]
         super().__init__(placeholder="📂 เลือกดูรูปภาพสกอร์แคลน...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         selected_clan = self.values[0]
-        cursor.execute("SELECT id, image_url, user_id FROM clan_scores WHERE clan_name = ? ORDER BY id ASC", (selected_clan,))
-        scores = cursor.fetchall()
+        scores_ref = db.collection("clans").document(selected_clan).collection("scores").order_by("timestamp").stream()
+        scores = [(s.id, s.to_dict()) for s in scores_ref]
 
         if not scores:
             await interaction.response.send_message(f"❌ แคลน `{selected_clan}` ยังไม่มีรูปภาพสกอร์ในระบบ", ephemeral=True)
@@ -353,10 +319,13 @@ class ClanGalleryView(discord.ui.View):
         self.next_button.disabled = self.index >= len(self.scores) - 1
 
     def get_embed(self):
-        score_id, image_url, user_id = self.scores[self.index]
+        score_doc_id, score_data = self.scores[self.index]
+        image_url = score_data.get("image_url")
+        user_id = score_data.get("user_id")
+        
         embed = discord.Embed(
             title=f"🛡️ สกอร์แคลน: {self.clan_name}",
-            description=f"📌 **ID รูปภาพ:** `{score_id}` (ใช้อ้างอิงตอนลบรูป)\n👤 **ผู้อัปโหลด:** <@{user_id}>",
+            description=f"📌 **ID รูปภาพ:** `{score_doc_id}`\n👤 **ผู้อัปโหลด:** <@{user_id}>",
             color=discord.Color.green()
         )
         embed.set_image(url=image_url)
@@ -378,11 +347,10 @@ class ClanGalleryView(discord.ui.View):
             await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
 
-# ==================== 5. คำสั่งแอดมิน & สมาชิกทั้งหมด ====================
+# ==================== 5. คำสั่งแอดมิน & สมาชิก ====================
 
-# --- คำสั่งกาชา (แอดมิน) ---
-@bot.tree.command(name="สร้างตู้กาชา", description="[แอดมิน] สร้างห้องตู้กาชาใหม่ พร้อมกำหนดราคาและรูปภาพ GIF")
-@app_commands.describe(ชื่อตู้="ชื่อระบุตู้กาชา", ใช้เวลาเล่นนาที="ใช้เวลาออนกี่นาทีต่อการสุ่ม", ลิงก์รูปภาพหรือgif="ลิงก์ GIF หรือลิงก์ตรงรูปภาพหน้าตู้")
+@bot.tree.command(name="สร้างตู้กาชา", description="[แอดมิน] สร้างห้องตู้กาชาใหม่")
+@app_commands.describe(ชื่อตู้="ชื่อระบุตู้กาชา", ใช้เวลาเล่นนาที="ใช้เวลาออนกี่นาทีต่อการสุ่ม", ลิงก์รูปภาพหรือgif="ลิงก์รูปภาพหน้าตู้")
 async def create_gacha_box(interaction: discord.Interaction, ชื่อตู้: str, ใช้เวลาเล่นนาที: int, ลิงก์รูปภาพหรือgif: str = None):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
@@ -390,7 +358,7 @@ async def create_gacha_box(interaction: discord.Interaction, ชื่อตู�
 
     embed = discord.Embed(
         title=f"🎰 ตู้กาชา: {ชื่อตู้}", 
-        description=f"⏱️ **ค่าใช้จ่าย:** ใช้เวลาออน `{ใช้เวลาเล่นนาที}` นาทีต่อการสุ่ม\n\n📦 **รายการของรางวัลในตู้:**\n❌ ยังไม่มีของรางวัลในตู้ (รอแอดมินเติม)", 
+        description=f"⏱️ **ค่าใช้จ่าย:** ใช้เวลาออน `{ใช้เวลาเล่นนาที}` นาทีต่อการสุ่ม\n\n📦 **รายการของรางวัลในตู้:**\n❌ ยังไม่มีของรางวัลในตู้", 
         color=discord.Color.gold()
     )
     if ลิงก์รูปภาพหรือgif:
@@ -400,208 +368,100 @@ async def create_gacha_box(interaction: discord.Interaction, ชื่อตู�
     await interaction.response.send_message(f"✅ สร้างตู้กาชา `{ชื่อตู้}` สำเร็จ!", ephemeral=True)
     message = await interaction.channel.send(embed=embed, view=view)
 
-    cursor.execute("""
-    INSERT OR REPLACE INTO gacha_boxes_info (box_name, cost_minutes, image_url, channel_id, message_id) 
-    VALUES (?, ?, ?, ?, ?)
-    """, (ชื่อตู้, ใช้เวลาเล่นนาที, ลิงก์รูปภาพหรือgif, interaction.channel.id, message.id))
-    db.commit()
+    db.collection("gacha_boxes").document(ชื่อตู้).set({
+        "cost_minutes": ใช้เวลาเล่นนาที,
+        "image_url": ลิงก์รูปภาพหรือgif,
+        "channel_id": interaction.channel.id,
+        "message_id": message.id
+    })
 
-@bot.tree.command(name="เพิ่มของรางวัลในตู้", description="[แอดมิน] เพิ่มยศ เรทเปอร์เซ็นต์ และสต๊อก (อัปเดตหน้าตู้ Real-time)")
-@app_commands.describe(ชื่อตู้="ชื่อตู้กาชาที่ต้องการใส่ของ", ยศรางวัล="เลือกยศที่ต้องการเพิ่ม", เรทเปอร์เซ็นต์="โอกาสออก เช่น 5.5 หรือ 50", จำนวนสต๊อก="จำนวนชิ้นที่มีในตู้")
+@bot.tree.command(name="เพิ่มของรางวัลในตู้", description="[แอดมิน] เพิ่มยศลงตู้กาชา")
+@app_commands.describe(ชื่อตู้="ชื่อตู้กาชา", ยศรางวัล="เลือกยศ", เรทเปอร์เซ็นต์="เรทเปอร์เซ็นต์ออก", จำนวนสต๊อก="จำนวนสต๊อก")
 async def add_gacha_prize(interaction: discord.Interaction, ชื่อตู้: str, ยศรางวัล: discord.Role, เรทเปอร์เซ็นต์: float, จำนวนสต๊อก: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    cursor.execute("SELECT box_name FROM gacha_boxes_info WHERE box_name = ?", (ชื่อตู้,))
-    if not cursor.fetchone():
+    box_ref = db.collection("gacha_boxes").document(ชื่อตู้)
+    if not box_ref.get().exists:
         await interaction.response.send_message(f"❌ ไม่พบตู้กาชาชื่อ `{ชื่อตู้}`", ephemeral=True)
         return
 
-    cursor.execute("INSERT OR REPLACE INTO gacha_prizes (box_name, role_id, role_name, rate, stock) VALUES (?, ?, ?, ?, ?)",
-                   (ชื่อตู้, ยศรางวัล.id, ยศรางวัล.name, เรทเปอร์เซ็นต์, จำนวนสต๊อก))
-    db.commit()
+    box_ref.collection("prizes").document(str(ยศรางวัล.id)).set({
+        "role_id": ยศรางวัล.id,
+        "role_name": ยศรางวัล.name,
+        "rate": เรทเปอร์เซ็นต์,
+        "stock": จำนวนสต๊อก
+    })
 
     await update_gacha_embed(interaction.guild, ชื่อตู้)
-    await interaction.response.send_message(f"✅ เพิ่มยศ `{ยศรางวัล.name}` ลงในตู้ `{ชื่อตู้}` เรียบร้อยแล้ว!", ephemeral=True)
+    await interaction.response.send_message(f"✅ เพิ่มยศ `{ยศรางวัล.name}` ลงในตู้เรียบร้อยแล้ว!", ephemeral=True)
 
-@bot.tree.command(name="เติมสต๊อก", description="[แอดมิน] เติมสต๊อกยศในตู้กาชา")
-@app_commands.describe(ชื่อตู้="ชื่อตู้กาชา", ยศรางวัล="เลือกยศที่ต้องการเติม", จำนวนที่ต้องการเติม="จำนวนชิ้นที่ต้องการเพิ่ม")
+@bot.tree.command(name="เติมสต๊อก", description="[แอดมิน] เติมสต๊อกยศ")
+@app_commands.describe(ชื่อตู้="ชื่อตู้กาชา", ยศรางวัล="เลือกยศ", จำนวนที่ต้องการเติม="จำนวนเพิ่ม")
 async def add_stock(interaction: discord.Interaction, ชื่อตู้: str, ยศรางวัล: discord.Role, จำนวนที่ต้องการเติม: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    cursor.execute("SELECT stock FROM gacha_prizes WHERE box_name = ? AND role_id = ?", (ชื่อตู้, ยศรางวัล.id))
-    result = cursor.fetchone()
-    if not result:
-        await interaction.response.send_message(f"❌ ไม่พบยศนี้ในตู้กาชา `{ชื่อตู้}`", ephemeral=True)
+    prize_ref = db.collection("gacha_boxes").document(ชื่อตู้).collection("prizes").document(str(ยศรางวัล.id))
+    prize_doc = prize_ref.get()
+    if not prize_doc.exists:
+        await interaction.response.send_message(f"❌ ไม่พบยศนี้ในตู้กาชา", ephemeral=True)
         return
 
-    new_stock = result[0] + จำนวนที่ต้องการเติม
-    cursor.execute("UPDATE gacha_prizes SET stock = ? WHERE box_name = ? AND role_id = ?", (new_stock, ชื่อตู้, ยศรางวัล.id))
-    db.commit()
+    new_stock = prize_doc.to_dict().get("stock", 0) + จำนวนที่ต้องการเติม
+    prize_ref.update({"stock": new_stock})
 
     await update_gacha_embed(interaction.guild, ชื่อตู้)
-    await interaction.response.send_message(f"✅ เติมสต๊อกยศ `{ยศรางวัล.name}` เป็น `{new_stock}` ชิ้นแล้ว!", ephemeral=True)
+    await interaction.response.send_message(f"✅ เติมสต๊อกเป็น `{new_stock}` ชิ้นแล้ว!", ephemeral=True)
 
-@bot.tree.command(name="ลบของรางวัลในตู้", description="[แอดมิน] ลบยศออกจากตู้กาชา")
-@app_commands.describe(ชื่อตู้="ชื่อตู้กาชา", ยศรางวัล="เลือกยศที่ต้องการลบ")
-async def delete_gacha_prize(interaction: discord.Interaction, ชื่อตู้: str, ยศรางวัล: discord.Role):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    cursor.execute("DELETE FROM gacha_prizes WHERE box_name = ? AND role_id = ?", (ชื่อตู้, ยศรางวัล.id))
-    db.commit()
-
-    await update_gacha_embed(interaction.guild, ชื่อตู้)
-    await interaction.response.send_message(f"✅ ลบยศ `{ยศรางวัล.name}` ออกจากตู้เรียบร้อยแล้ว", ephemeral=True)
-
-@bot.tree.command(name="แก้ไขเวลากาชา", description="[แอดมิน] เปลี่ยนแปลงเวลาที่ใช้ในการสุ่มของตู้กาชา")
-@app_commands.describe(ชื่อตู้="ชื่อตู้กาชา", นาทีใหม่="จำนวนนาทีใหม่ต่อการสุ่ม")
-async def edit_gacha_time(interaction: discord.Interaction, ชื่อตู้: str, นาทีใหม่: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    cursor.execute("UPDATE gacha_boxes_info SET cost_minutes = ? WHERE box_name = ?", (นาทีใหม่, ชื่อตู้))
-    db.commit()
-
-    await update_gacha_embed(interaction.guild, ชื่อตู้)
-    await interaction.response.send_message(f"✅ แก้ไขราคาตู้ `{ชื่อตู้}` เป็น `{นาทีใหม่}` นาทีเรียบร้อย", ephemeral=True)
-
-@bot.tree.command(name="เพิ่มเวลาออน", description="[แอดมิน] เพิ่มเวลาออนให้สมาชิก")
-@app_commands.describe(สมาชิก="เลือกผู้ใช้งาน", จำนวนนาที="จำนวนนาทีที่ต้องการเพิ่ม")
-async def add_total_time(interaction: discord.Interaction, สมาชิก: discord.Member, จำนวนนาที: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    add_seconds = จำนวนนาที * 60
-    cursor.execute("SELECT total_time FROM users WHERE user_id = ?", (สมาชิก.id,))
-    result = cursor.fetchone()
-
-    if result:
-        new_time = result[0] + add_seconds
-        cursor.execute("UPDATE users SET total_time = ? WHERE user_id = ?", (new_time, สมาชิก.id))
-    else:
-        cursor.execute("INSERT INTO users (user_id, total_time) VALUES (?, ?)", (สมาชิก.id, add_seconds))
-    db.commit()
-
-    await interaction.response.send_message(f"✅ เพิ่มเวลาออนให้ {สมาชิก.mention} จำนวน `{จำนวนนาที}` นาทีแล้ว", ephemeral=True)
-
-@bot.tree.command(name="ลบเวลาผู้คน", description="[แอดมิน] หักเวลาออนของสมาชิก")
-@app_commands.describe(สมาชิก="เลือกผู้ใช้งาน", จำนวนนาทีที่ต้องการลบ="จำนวนนาทีที่ต้องการหัก")
-async def remove_total_time(interaction: discord.Interaction, สมาชิก: discord.Member, จำนวนนาทีที่ต้องการลบ: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    remove_seconds = จำนวนนาทีที่ต้องการลบ * 60
-    cursor.execute("SELECT total_time FROM users WHERE user_id = ?", (สมาชิก.id,))
-    result = cursor.fetchone()
-
-    if not result:
-        await interaction.response.send_message("❌ สมาชิกคนนี้ไม่มีข้อมูลเวลาออน", ephemeral=True)
-        return
-
-    new_time = max(0, result[0] - remove_seconds)
-    cursor.execute("UPDATE users SET total_time = ? WHERE user_id = ?", (new_time, สมาชิก.id))
-    db.commit()
-
-    await interaction.response.send_message(f"✅ หักเวลา {สมาชิก.mention} ออก `{จำนวนนาทีที่ต้องการลบ}` นาทีแล้ว", ephemeral=True)
-
-
-# --- คำสั่งระบบสกอร์แคลน (แอดมิน & สมาชิก) ---
-@bot.tree.command(name="สร้างสกอแคลน", description="[แอดมิน] สร้างหัวข้อแคลนใหม่ในระบบสกอร์")
-@app_commands.describe(ชื่อแคลน="ชื่อแคลนที่ต้องการสร้าง")
+@bot.tree.command(name="สร้างสกอแคลน", description="[แอดมิน] สร้างหัวข้อแคลน")
+@app_commands.describe(ชื่อแคลน="ชื่อแคลน")
 async def create_clan(interaction: discord.Interaction, ชื่อแคลน: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    try:
-        cursor.execute("INSERT INTO clans (clan_name) VALUES (?)", (ชื่อแคลน,))
-        db.commit()
-        await interaction.response.send_message(f"✅ สร้างแคลน `{ชื่อแคลน}` ในระบบสกอร์เรียบร้อยแล้ว!", ephemeral=True)
-        await update_clan_dashboard(interaction.guild)
-    except sqlite3.IntegrityError:
-        await interaction.response.send_message(f"❌ มีแคลน `{ชื่อแคลน}` อยู่ในระบบแล้ว", ephemeral=True)
-
-@bot.tree.command(name="ลบแคลน", description="[แอดมิน] ลบชื่อแคลนและรูปภาพทั้งหมดในแคลนนั้นทิ้ง")
-@app_commands.describe(ชื่อแคลน="ชื่อแคลนที่ต้องการลบ")
-async def delete_clan(interaction: discord.Interaction, ชื่อแคลน: str):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
-        return
-
-    cursor.execute("DELETE FROM clans WHERE clan_name = ?", (ชื่อแคลน,))
-    cursor.execute("DELETE FROM clan_scores WHERE clan_name = ?", (ชื่อแคลน,))
-    db.commit()
-
-    await interaction.response.send_message(f"⚠️ ลบแคลน `{ชื่อแคลน}` และข้อมูลรูปภาพทั้งหมดเรียบร้อยแล้ว", ephemeral=True)
+    db.collection("clans").document(ชื่อแคลน).set({"created_at": firestore.SERVER_TIMESTAMP})
+    await interaction.response.send_message(f"✅ สร้างแคลน `{ชื่อแคลน}` เรียบร้อย!", ephemeral=True)
     await update_clan_dashboard(interaction.guild)
 
-@bot.tree.command(name="แสดงผลรวม", description="[แอดมิน] สร้างหน้าต่างรายงานสกอร์แคลนแบบ Real-time พร้อมดรอปดาวน์")
+@bot.tree.command(name="แสดงผลรวม", description="[แอดมิน] สร้างหน้าต่างรายงานสกอร์แคลน")
 async def show_clan_dashboard(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    embed = discord.Embed(
-        title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน (Vegas Clan Score)",
-        description="กำลังโหลดข้อมูล...",
-        color=discord.Color.blue()
-    )
-
+    embed = discord.Embed(title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน", description="กำลังโหลด...", color=discord.Color.blue())
     await interaction.response.send_message("✅ สร้างหน้าต่างรายงานผลรวมเรียบร้อยแล้ว!", ephemeral=True)
     message = await interaction.channel.send(embed=embed)
 
-    cursor.execute("INSERT OR REPLACE INTO clan_dashboard (guild_id, channel_id, message_id) VALUES (?, ?, ?)",
-                   (interaction.guild.id, interaction.channel.id, message.id))
-    db.commit()
+    db.collection("settings").document("clan_dashboard").set({
+        "guild_id": interaction.guild.id,
+        "channel_id": interaction.channel.id,
+        "message_id": message.id
+    })
     await update_clan_dashboard(interaction.guild)
 
-@bot.tree.command(name="เพิ่มรูป", description="อัปโหลดรูปภาพสกอร์แคลนเข้าสู่ระบบ")
-@app_commands.describe(ชื่อแคลน="เลือกชื่อแคลน", รูปภาพสกอร์="แนบไฟล์รูปภาพสกอร์การแข่ง")
+@bot.tree.command(name="เพิ่มรูป", description="อัปโหลดรูปภาพสกอร์แคลน")
+@app_commands.describe(ชื่อแคลน="ชื่อแคลน", รูปภาพสกอร์="ไฟล์รูป")
 async def add_clan_score(interaction: discord.Interaction, ชื่อแคลน: str, รูปภาพสกอร์: discord.Attachment):
-    cursor.execute("SELECT clan_name FROM clans WHERE clan_name = ?", (ชื่อแคลน,))
-    if not cursor.fetchone():
-        await interaction.response.send_message(f"❌ ไม่พบแคลน `{ชื่อแคลน}` ในระบบ (กรุณาให้แอดมินสร้างแคลนก่อน)", ephemeral=True)
+    clan_ref = db.collection("clans").document(ชื่อแคลน)
+    if not clan_ref.get().exists:
+        await interaction.response.send_message(f"❌ ไม่พบแคลน `{ชื่อแคลน}` ในระบบ", ephemeral=True)
         return
 
-    cursor.execute("INSERT INTO clan_scores (clan_name, user_id, image_url) VALUES (?, ?, ?)",
-                   (ชื่อแคลน, interaction.user.id, รูปภาพสกอร์.url))
-    db.commit()
+    clan_ref.collection("scores").add({
+        "user_id": interaction.user.id,
+        "image_url": รูปภาพสกอร์.url,
+        "timestamp": firestore.SERVER_TIMESTAMP
+    })
 
-    await interaction.response.send_message(f"✅ บันทึกรูปภาพสกอร์ของแคลน `{ชื่อแคลน}` สำเร็จเรียบร้อยแล้ว!", ephemeral=True)
-    await update_clan_dashboard(interaction.guild)
-
-@bot.tree.command(name="ลบรูปภาพ", description="ลบรูปภาพสกอร์แคลนของคุณด้วยรหัสรูป (ID)")
-@app_commands.describe(รหัสรูปภาพ_id="รหัส ID ของรูปภาพที่ต้องการลบ")
-async def delete_clan_score(interaction: discord.Interaction, รหัสรูปภาพ_id: int):
-    cursor.execute("SELECT user_id, clan_name FROM clan_scores WHERE id = ?", (รหัสรูปภาพ_id,))
-    score = cursor.fetchone()
-
-    if not score:
-        await interaction.response.send_message(f"❌ ไม่พบรูปภาพที่มีรหัส ID `{รหัสรูปภาพ_id}` นี้ในระบบ", ephemeral=True)
-        return
-
-    owner_id, clan_name = score
-
-    if interaction.user.id != owner_id and not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ลบรูปภาพนี้ (ลบได้เฉพาะรูปที่คุณอัปโหลดเท่านั้น)", ephemeral=True)
-        return
-
-    cursor.execute("DELETE FROM clan_scores WHERE id = ?", (รหัสรูปภาพ_id,))
-    db.commit()
-
-    await interaction.response.send_message(f"🗑️ ลบรูปภาพ ID `{รหัสรูปภาพ_id}` ออกจากระบบเรียบร้อยแล้ว", ephemeral=True)
+    await interaction.response.send_message(f"✅ บันทึกรูปภาพสกอร์แคลน `{ชื่อแคลน}` สำเร็จ!", ephemeral=True)
     await update_clan_dashboard(interaction.guild)
 
 
-# ==================== บรรทัดรันระบบหลัก ====================
 if __name__ == "__main__":
     keep_alive()
     bot.run(os.getenv("DISCORD_TOKEN"))
