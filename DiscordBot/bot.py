@@ -28,7 +28,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Vegas Bot is Online with Firebase!"
+    return "Vegas Bot is Online with Firebase (Multi-Server)!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -46,6 +46,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# เก็บข้อมูลเซสชันเสียงแบบแยกตาม Server และ User: voice_sessions[guild_id][user_id] = start_time
 voice_sessions = {}
 
 def format_time(seconds):
@@ -56,7 +57,7 @@ def format_time(seconds):
 
 @bot.event
 async def on_ready():
-    print(f" Vegas BOT ออนไลน์แล้ว (เชื่อมต่อ Firebase เรียบร้อย): {bot.user.name}")
+    print(f" Vegas BOT ออนไลน์แล้ว (รองรับระบบแยกแต่ละเซิร์ฟเวอร์): {bot.user.name}")
     try:
         synced = await bot.tree.sync()
         print(f"ซิงค์ Slash Commands ทั้งหมด {len(synced)} คำสั่งเรียบร้อยแล้ว")
@@ -73,7 +74,8 @@ async def sync_commands(interaction: discord.Interaction):
     await interaction.response.send_message(f"✅ ซิงค์คำสั่ง Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง!", ephemeral=True)
 
 async def update_gacha_embed(guild: discord.Guild, box_name: str):
-    box_ref = db.collection("gacha_boxes_info").document(box_name)
+    guild_ref = db.collection("guilds").document(str(guild.id))
+    box_ref = guild_ref.collection("gacha_boxes_info").document(box_name)
     box_doc = box_ref.get()
     if not box_doc.exists:
         return
@@ -123,7 +125,8 @@ async def update_gacha_embed(guild: discord.Guild, box_name: str):
     await message.edit(embed=embed, view=view)
 
 async def update_clan_dashboard(guild: discord.Guild):
-    dash_ref = db.collection("clan_dashboard").document(str(guild.id))
+    guild_ref = db.collection("guilds").document(str(guild.id))
+    dash_ref = guild_ref.collection("clan_dashboard").document("main")
     dash_doc = dash_ref.get()
     if not dash_doc.exists:
         return
@@ -141,7 +144,7 @@ async def update_clan_dashboard(guild: discord.Guild):
     except Exception:
         return
 
-    clans_ref = db.collection("clans").stream()
+    clans_ref = guild_ref.collection("clans").stream()
     clans = [c.id for c in clans_ref]
 
     embed = discord.Embed(
@@ -156,51 +159,59 @@ async def update_clan_dashboard(guild: discord.Guild):
     else:
         desc = ""
         for c_name in clans:
-            scores_ref = db.collection("clans").document(c_name).collection("scores").stream()
+            scores_ref = guild_ref.collection("clans").document(c_name).collection("scores").stream()
             count = sum(1 for _ in scores_ref)
             desc += f"🛡 **{c_name}**: มีรูปภาพสะสม `{count}` รูป\n"
         embed.add_field(name="Photo All", value=desc, inline=False)
-        view = ClanSelectView(clans)
+        view = ClanSelectView(guild_ref, clans)
 
     await message.edit(embed=embed, view=view)
 
+# ==================== ระบบนับเวลาออนแยกตาม Server ====================
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
     current_time = int(time.time())
+    guild_id = member.guild.id
 
-    if before.channel is None and after.channel is not None:
-        voice_sessions[member.id] = current_time
-    elif before.channel is not None and after.channel is None:
-        if member.id in voice_sessions:
-            start_time = voice_sessions.pop(member.id)
+    if guild_id not in voice_sessions:
+        voice_sessions[guild_id] = {}
+
+    # ออกจากห้องเสียง
+    if before.channel is not None and (after.channel is None or after.channel.id != before.channel.id):
+        if member.id in voice_sessions[guild_id]:
+            start_time = voice_sessions[guild_id].pop(member.id)
             duration = current_time - start_time
 
-            user_ref = db.collection("users").document(str(member.id))
+            guild_ref = db.collection("guilds").document(str(guild_id))
+            user_ref = guild_ref.collection("users").document(str(member.id))
             user_doc = user_ref.get()
             
-            if user_doc.exists:
-                new_total = user_doc.to_dict().get("total_time", 0) + duration
-            else:
-                new_total = duration
-
+            new_total = user_doc.to_dict().get("total_time", 0) + duration if user_doc.exists else duration
             user_ref.set({"total_time": new_total}, merge=True)
 
-@bot.tree.command(name="เช็คเวลาออน", description="ตรวจสอบชั่วโมงเวลาออนไลน์ของคุณแบบเรียลไทม์")
+    # เข้าห้องเสียงใหม่
+    if after.channel is not None and (before.channel is None or before.channel.id != after.channel.id):
+        voice_sessions[guild_id][member.id] = current_time
+
+@bot.tree.command(name="เช็คเวลาออน", description="ตรวจสอบชั่วโมงเวลาออนไลน์ของคุณในเซิร์ฟเวอร์นี้แบบเรียลไทม์")
 async def check_time(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
-    user_id_str = str(interaction.user.id)
-    user_ref = db.collection("users").document(user_id_str)
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
+    
+    guild_ref = db.collection("guilds").document(str(guild_id))
+    user_ref = guild_ref.collection("users").document(str(user_id))
     user_doc = user_ref.get()
     
     total_sec = user_doc.to_dict().get("total_time", 0) if user_doc.exists else 0
-    if interaction.user.id in voice_sessions:
-        total_sec += int(time.time()) - voice_sessions[interaction.user.id]
+    if guild_id in voice_sessions and user_id in voice_sessions[guild_id]:
+        total_sec += int(time.time()) - voice_sessions[guild_id][user_id]
 
-    embed = discord.Embed(title="📊 ข้อมูลเวลาออนไลน์ของคุณ", color=discord.Color.blue())
-    embed.add_field(name="⏱ เวลาออนทั้งหมด (ใช้เป็นแต้มสุ่มกาชา)", value=f"`{format_time(total_sec)}`", inline=False)
+    embed = discord.Embed(title="📊 ข้อมูลเวลาออนไลน์ของคุณ (ประจำเซิร์ฟเวอร์นี้)", color=discord.Color.blue())
+    embed.add_field(name="⏱ เวลาออนทั้งหมด", value=f"`{format_time(total_sec)}`", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 class GachaView(discord.ui.View):
@@ -212,13 +223,14 @@ class GachaView(discord.ui.View):
     async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         
+        guild_id = interaction.guild.id
         user_id = interaction.user.id
-        user_id_str = str(user_id)
         
-        box_ref = db.collection("gacha_boxes_info").document(self.box_name)
+        guild_ref = db.collection("guilds").document(str(guild_id))
+        box_ref = guild_ref.collection("gacha_boxes_info").document(self.box_name)
         box_doc = box_ref.get()
         if not box_doc.exists:
-            await interaction.followup.send("❌ ไม่พบข้อมูลตู้กาชานี้ในระบบ!", ephemeral=True)
+            await interaction.followup.send("❌ ไม่พบข้อมูลตู้กาชานี้ในระบบของเซิร์ฟเวอร์นี้!", ephemeral=True)
             return
 
         box_info = box_doc.to_dict()
@@ -229,12 +241,12 @@ class GachaView(discord.ui.View):
             await interaction.followup.send("❌ ตู้กาชานี้ยังไม่มีของรางวัลในระบบ!", ephemeral=True)
             return
 
-        user_ref = db.collection("users").document(user_id_str)
+        user_ref = guild_ref.collection("users").document(str(user_id))
         user_doc = user_ref.get()
         user_total_sec = user_doc.to_dict().get("total_time", 0) if user_doc.exists else 0
 
-        if user_id in voice_sessions:
-            user_total_sec += int(time.time()) - voice_sessions[user_id]
+        if guild_id in voice_sessions and user_id in voice_sessions[guild_id]:
+            user_total_sec += int(time.time()) - voice_sessions[guild_id][user_id]
 
         if user_total_sec < cost_seconds:
             await interaction.followup.send(f"❌ เวลาออนของคุณไม่เพียงพอ! (ต้องใช้ {box_info.get('cost_minutes', 60)} นาที)", ephemeral=True)
@@ -263,8 +275,8 @@ class GachaView(discord.ui.View):
         role_id, role_name = selected.get("role_id"), selected.get("role_name")
 
         new_total_sec = user_total_sec - cost_seconds
-        if user_id in voice_sessions:
-            voice_sessions[user_id] = int(time.time())
+        if guild_id in voice_sessions and user_id in voice_sessions[guild_id]:
+            voice_sessions[guild_id][user_id] = int(time.time())
         user_ref.set({"total_time": new_total_sec}, merge=True)
 
         prize_doc_ref = box_ref.collection("prizes").document(str(role_id))
@@ -284,14 +296,15 @@ class GachaView(discord.ui.View):
             await interaction.followup.send(f"🎁 สุ่มได้ยศ **{role_name}** สำเร็จ!", ephemeral=True)
 
 class ClanSelectDropdown(discord.ui.Select):
-    def __init__(self, clans):
+    def __init__(self, guild_ref, clans):
+        self.guild_ref = guild_ref
         options = [discord.SelectOption(label=c, value=c, description=f"ดูรูปภาพสกอร์ของแคลน {c}") for c in clans]
         super().__init__(placeholder="📂 VegasRank1...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         selected_clan = self.values[0]
-        scores_ref = db.collection("clans").document(selected_clan).collection("scores").order_by("timestamp").stream()
+        scores_ref = self.guild_ref.collection("clans").document(selected_clan).collection("scores").order_by("timestamp").stream()
         scores = [(s.id, s.to_dict()) for s in scores_ref]
 
         if not scores:
@@ -303,9 +316,9 @@ class ClanSelectDropdown(discord.ui.Select):
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 class ClanSelectView(discord.ui.View):
-    def __init__(self, clans):
+    def __init__(self, guild_ref, clans):
         super().__init__(timeout=None)
-        self.add_item(ClanSelectDropdown(clans))
+        self.add_item(ClanSelectDropdown(guild_ref, clans))
 
 class ClanGalleryView(discord.ui.View):
     def __init__(self, scores, clan_name, index=0):
@@ -347,7 +360,7 @@ class ClanGalleryView(discord.ui.View):
             self.update_buttons()
             await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
-# ==================== คำสั่งทั้งหมดของบอท ====================
+# ==================== คำสั่งทั้งหมดของบอท (แยกตาม Server) ====================
 
 @bot.tree.command(name="สร้างตู้กาชา", description="[แอดมิน] สร้างห้องตู้กาชาใหม่ พร้อมกำหนดราคาและรูปภาพ GIF")
 @app_commands.describe(ชื่อตู้="ชื่อระบุตู้กาชา", ใช้เวลาเล่นนาที="ใช้เวลาออนกี่นาทีต่อการสุ่ม", ลิงก์รูปภาพหรือgif="ลิงก์ GIF หรือลิงก์ตรงรูปภาพหน้าตู้")
@@ -368,7 +381,8 @@ async def create_gacha_box(interaction: discord.Interaction, ชื่อตู�
     await interaction.response.send_message(f"✅ สร้างตู้กาชา `{ชื่อตู้}` สำเร็จ!", ephemeral=True)
     message = await interaction.channel.send(embed=embed, view=view)
 
-    db.collection("gacha_boxes_info").document(ชื่อตู้).set({
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    guild_ref.collection("gacha_boxes_info").document(ชื่อตู้).set({
         "cost_minutes": ใช้เวลาเล่นนาที,
         "image_url": ลิงก์รูปภาพหรือgif,
         "channel_id": interaction.channel.id,
@@ -382,7 +396,8 @@ async def add_gacha_prize(interaction: discord.Interaction, ชื่อตู�
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    box_ref = db.collection("gacha_boxes_info").document(ชื่อตู้)
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    box_ref = guild_ref.collection("gacha_boxes_info").document(ชื่อตู้)
     if not box_ref.get().exists:
         await interaction.response.send_message(f"❌ ไม่พบตู้กาชาชื่อ `{ชื่อตู้}`", ephemeral=True)
         return
@@ -404,7 +419,8 @@ async def add_stock(interaction: discord.Interaction, ชื่อตู้: str
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    prize_ref = db.collection("gacha_boxes_info").document(ชื่อตู้).collection("prizes").document(str(ยศรางวัล.id))
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    prize_ref = guild_ref.collection("gacha_boxes_info").document(ชื่อตู้).collection("prizes").document(str(ยศรางวัล.id))
     prize_doc = prize_ref.get()
     if not prize_doc.exists:
         await interaction.response.send_message(f"❌ ไม่พบยศนี้ในตู้กาชา `{ชื่อตู้}`", ephemeral=True)
@@ -423,7 +439,8 @@ async def delete_gacha_prize(interaction: discord.Interaction, ชื่อต�
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    db.collection("gacha_boxes_info").document(ชื่อตู้).collection("prizes").document(str(ยศรางวัล.id)).delete()
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    guild_ref.collection("gacha_boxes_info").document(ชื่อตู้).collection("prizes").document(str(ยศรางวัล.id)).delete()
     await update_gacha_embed(interaction.guild, ชื่อตู้)
     await interaction.response.send_message(f"✅ ลบยศ `{ยศรางวัล.name}` ออกจากตู้เรียบร้อยแล้ว", ephemeral=True)
 
@@ -434,7 +451,8 @@ async def edit_gacha_time(interaction: discord.Interaction, ชื่อตู�
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    db.collection("gacha_boxes_info").document(ชื่อตู้).update({"cost_minutes": นาทีใหม่})
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    guild_ref.collection("gacha_boxes_info").document(ชื่อตู้).update({"cost_minutes": นาทีใหม่})
     await update_gacha_embed(interaction.guild, ชื่อตู้)
     await interaction.response.send_message(f"✅ แก้ไขราคาตู้ `{ชื่อตู้}` เป็น `{นาทีใหม่}` นาทีเรียบร้อย", ephemeral=True)
 
@@ -442,7 +460,8 @@ async def edit_gacha_time(interaction: discord.Interaction, ชื่อตู�
 @app_commands.describe(ชื่อตู้="ชื่อตู้กาชาที่ต้องการตรวจสอบ")
 async def check_gacha_box(interaction: discord.Interaction, ชื่อตู้: str):
     await interaction.response.defer(ephemeral=True)
-    box_ref = db.collection("gacha_boxes_info").document(ชื่อตู้)
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    box_ref = guild_ref.collection("gacha_boxes_info").document(ชื่อตู้)
     box_doc = box_ref.get()
     if not box_doc.exists:
         await interaction.followup.send(f"❌ ไม่พบตู้กาชาชื่อ `{ชื่อตู้}` ในระบบ", ephemeral=True)
@@ -469,14 +488,11 @@ async def add_total_time(interaction: discord.Interaction, สมาชิก: d
         return
 
     add_seconds = จำนวนนาที * 60
-    user_ref = db.collection("users").document(str(สมาชิก.id))
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    user_ref = guild_ref.collection("users").document(str(สมาชิก.id))
     user_doc = user_ref.get()
 
-    if user_doc.exists:
-        new_time = user_doc.to_dict().get("total_time", 0) + add_seconds
-    else:
-        new_time = add_seconds
-
+    new_time = user_doc.to_dict().get("total_time", 0) + add_seconds if user_doc.exists else add_seconds
     user_ref.set({"total_time": new_time}, merge=True)
     await interaction.response.send_message(f"✅ เพิ่มเวลาออนให้ {สมาชิก.mention} จำนวน `{จำนวนนาที}` นาทีแล้ว", ephemeral=True)
 
@@ -488,11 +504,12 @@ async def remove_total_time(interaction: discord.Interaction, สมาชิก
         return
 
     remove_seconds = จำนวนนาทีที่ต้องการลบ * 60
-    user_ref = db.collection("users").document(str(สมาชิก.id))
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    user_ref = guild_ref.collection("users").document(str(สมาชิก.id))
     user_doc = user_ref.get()
 
     if not user_doc.exists:
-        await interaction.response.send_message(f"❌ สมาชิกคนนี้ไม่มีข้อมูลเวลาออน", ephemeral=True)
+        await interaction.response.send_message(f"❌ สมาชิกคนนี้ไม่มีข้อมูลเวลาออนในเซิร์ฟเวอร์นี้", ephemeral=True)
         return
 
     new_time = max(0, user_doc.to_dict().get("total_time", 0) - remove_seconds)
@@ -503,13 +520,16 @@ async def remove_total_time(interaction: discord.Interaction, สมาชิก
 @app_commands.describe(สมาชิก="เลือกสมาชิกที่ต้องการตรวจสอบ")
 async def check_other_time(interaction: discord.Interaction, สมาชิก: discord.Member):
     await interaction.response.defer(ephemeral=True)
-    user_id_str = str(สมาชิก.id)
-    user_ref = db.collection("users").document(user_id_str)
+    guild_id = interaction.guild.id
+    user_id = สมาชิก.id
+    
+    guild_ref = db.collection("guilds").document(str(guild_id))
+    user_ref = guild_ref.collection("users").document(str(user_id))
     user_doc = user_ref.get()
     
     total_sec = user_doc.to_dict().get("total_time", 0) if user_doc.exists else 0
-    if สมาชิก.id in voice_sessions:
-        total_sec += int(time.time()) - voice_sessions[สมาชิก.id]
+    if guild_id in voice_sessions and user_id in voice_sessions[guild_id]:
+        total_sec += int(time.time()) - voice_sessions[guild_id][user_id]
 
     embed = discord.Embed(title=f"📊 ข้อมูลเวลาออนไลน์ของ {สมาชิก.display_name}", color=discord.Color.blue())
     embed.add_field(name="⏱ เวลาออนสะสม", value=f"`{format_time(total_sec)}`", inline=False)
@@ -522,7 +542,8 @@ async def create_clan(interaction: discord.Interaction, ชื่อแคลน
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    clan_ref = db.collection("clans").document(ชื่อแคลน)
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    clan_ref = guild_ref.collection("clans").document(ชื่อแคลน)
     if clan_ref.get().exists:
         await interaction.response.send_message(f"❌ มีแคลน `{ชื่อแคลน}` อยู่ในระบบแล้ว", ephemeral=True)
         return
@@ -538,7 +559,8 @@ async def delete_clan(interaction: discord.Interaction, ชื่อแคลน
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    db.collection("clans").document(ชื่อแคลน).delete()
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    guild_ref.collection("clans").document(ชื่อแคลน).delete()
     await interaction.response.send_message(f"⚠️ ลบแคลน `{ชื่อแคลน}` เรียบร้อยแล้ว", ephemeral=True)
     await update_clan_dashboard(interaction.guild)
 
@@ -548,11 +570,12 @@ async def show_clan_dashboard(interaction: discord.Interaction):
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    embed = discord.Embed(title="📊 ระบบรวมรูป Star Vegas", description="VegasRank1", color=discord.Color.blue())
+    embed = discord.Embed(title="✨ ระบบรวมรูป Star Vegas", description="VegasRank1", color=discord.Color.blue())
     await interaction.response.send_message("✅ สร้างหน้าต่างรายงานผลรวมเรียบร้อยแล้ว!", ephemeral=True)
     message = await interaction.channel.send(embed=embed)
 
-    db.collection("clan_dashboard").document(str(interaction.guild.id)).set({
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    guild_ref.collection("clan_dashboard").document("main").set({
         "guild_id": interaction.guild.id,
         "channel_id": interaction.channel.id,
         "message_id": message.id
@@ -563,7 +586,8 @@ async def show_clan_dashboard(interaction: discord.Interaction):
 @app_commands.describe(ชื่อแคลน="เลือกชื่อแคลน", รูปภาพสกอร์="แนบไฟล์รูปภาพสกอร์การแข่ง")
 async def add_clan_score(interaction: discord.Interaction, ชื่อแคลน: str, รูปภาพสกอร์: discord.Attachment):
     await interaction.response.defer(ephemeral=True)
-    clan_ref = db.collection("clans").document(ชื่อแคลน)
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
+    clan_ref = guild_ref.collection("clans").document(ชื่อแคลน)
     if not clan_ref.get().exists:
         await interaction.followup.send(f"❌ ไม่พบแคลน `{ชื่อแคลน}` ในระบบ", ephemeral=True)
         return
@@ -581,11 +605,12 @@ async def add_clan_score(interaction: discord.Interaction, ชื่อแคล
 @app_commands.describe(รหัสรูปภาพ_id="รหัส ID ของรูปภาพที่ต้องการลบ")
 async def delete_clan_score(interaction: discord.Interaction, รหัสรูปภาพ_id: str):
     await interaction.response.defer(ephemeral=True)
+    guild_ref = db.collection("guilds").document(str(interaction.guild.id))
     found = False
     
-    clans_ref = db.collection("clans").stream()
+    clans_ref = guild_ref.collection("clans").stream()
     for clan in clans_ref:
-        score_ref = db.collection("clans").document(clan.id).collection("scores").document(รหัสรูปภาพ_id)
+        score_ref = guild_ref.collection("clans").document(clan.id).collection("scores").document(รหัสรูปภาพ_id)
         score_doc = score_ref.get()
         if score_doc.exists:
             score_data = score_doc.to_dict()
