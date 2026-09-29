@@ -145,13 +145,13 @@ async def update_clan_dashboard(guild: discord.Guild):
     clans = [c.id for c in clans_ref]
 
     embed = discord.Embed(
-        title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน (Vegas Clan Score)",
-        description="เลือกชื่อแคลนจากเมนูดรอปดาวน์ด้านล่างเพื่อดูรูปภาพสกอร์การแข่งทั้งหมด",
+        title="✨ ระบบรวมรูป Star Vegas",
+        description="VegasRank1",
         color=discord.Color.blue()
     )
 
     if not clans:
-        embed.add_field(name="สถานะ", value="❌ ยังไม่มีแคลนในระบบ", inline=False)
+        embed.add_field(name="Photo All", value="❌ ยังไม่มีแคลนในระบบ", inline=False)
         view = None
     else:
         desc = ""
@@ -159,7 +159,7 @@ async def update_clan_dashboard(guild: discord.Guild):
             scores_ref = db.collection("clans").document(c_name).collection("scores").stream()
             count = sum(1 for _ in scores_ref)
             desc += f"🛡 **{c_name}**: มีรูปภาพสะสม `{count}` รูป\n"
-        embed.add_field(name="📋 รายชื่อแคลนทั้งหมด", value=desc, inline=False)
+        embed.add_field(name="Photo All", value=desc, inline=False)
         view = ClanSelectView(clans)
 
     await message.edit(embed=embed, view=view)
@@ -286,7 +286,7 @@ class GachaView(discord.ui.View):
 class ClanSelectDropdown(discord.ui.Select):
     def __init__(self, clans):
         options = [discord.SelectOption(label=c, value=c, description=f"ดูรูปภาพสกอร์ของแคลน {c}") for c in clans]
-        super().__init__(placeholder="📂 เลือกดูรูปภาพสกอร์แคลน...", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="📂 VegasRank1...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -548,7 +548,7 @@ async def show_clan_dashboard(interaction: discord.Interaction):
         await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้", ephemeral=True)
         return
 
-    embed = discord.Embed(title="📊 ระบบสรุปผลและรูปภาพสกอร์แคลน", description="กำลังโหลดข้อมูล...", color=discord.Color.blue())
+    embed = discord.Embed(title="📊 ระบบรวมรูป Star Vegas", description="VegasRank1", color=discord.Color.blue())
     await interaction.response.send_message("✅ สร้างหน้าต่างรายงานผลรวมเรียบร้อยแล้ว!", ephemeral=True)
     message = await interaction.channel.send(embed=embed)
 
