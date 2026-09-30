@@ -23,7 +23,7 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# ==================== ระบบเว็บเซิร์ฟเวอร์จำลอง (สำหรับรันบน Render 24 ชม.) ====================
+# ==================== ระบบเว็บเซิร์ฟเวอร์จำลอง (รองรับพอร์ตอัตโนมัติของ Render) ====================
 app = Flask('')
 
 @app.route('/')
@@ -31,7 +31,8 @@ def home():
     return "Vegas Bot is Online with Firebase (Multi-Server)!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
@@ -46,7 +47,6 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# เก็บข้อมูลเซสชันเสียงแบบแยกตาม Server และ User: voice_sessions[guild_id][user_id] = start_time
 voice_sessions = {}
 
 def format_time(seconds):
@@ -167,7 +167,6 @@ async def update_clan_dashboard(guild: discord.Guild):
 
     await message.edit(embed=embed, view=view)
 
-# ==================== ระบบนับเวลาออนแยกตาม Server ====================
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
@@ -178,7 +177,6 @@ async def on_voice_state_update(member, before, after):
     if guild_id not in voice_sessions:
         voice_sessions[guild_id] = {}
 
-    # ออกจากห้องเสียง
     if before.channel is not None and (after.channel is None or after.channel.id != before.channel.id):
         if member.id in voice_sessions[guild_id]:
             start_time = voice_sessions[guild_id].pop(member.id)
@@ -191,7 +189,6 @@ async def on_voice_state_update(member, before, after):
             new_total = user_doc.to_dict().get("total_time", 0) + duration if user_doc.exists else duration
             user_ref.set({"total_time": new_total}, merge=True)
 
-    # เข้าห้องเสียงใหม่
     if after.channel is not None and (before.channel is None or before.channel.id != after.channel.id):
         voice_sessions[guild_id][member.id] = current_time
 
@@ -360,7 +357,7 @@ class ClanGalleryView(discord.ui.View):
             self.update_buttons()
             await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
-# ==================== คำสั่งทั้งหมดของบอท (แยกตาม Server) ====================
+# ==================== คำสั่งทั้งหมดของบอท ====================
 
 @bot.tree.command(name="สร้างตู้กาชา", description="[แอดมิน] สร้างห้องตู้กาชาใหม่ พร้อมกำหนดราคาและรูปภาพ GIF")
 @app_commands.describe(ชื่อตู้="ชื่อระบุตู้กาชา", ใช้เวลาเล่นนาที="ใช้เวลาออนกี่นาทีต่อการสุ่ม", ลิงก์รูปภาพหรือgif="ลิงก์ GIF หรือลิงก์ตรงรูปภาพหน้าตู้")
